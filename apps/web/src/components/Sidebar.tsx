@@ -3,6 +3,7 @@ import {
   ChevronRightIcon,
   FolderIcon,
   GitPullRequestIcon,
+  ListFilterIcon,
   PlusIcon,
   RocketIcon,
   SettingsIcon,
@@ -46,7 +47,7 @@ import { derivePendingApprovals, derivePendingUserInputs } from "../session-logi
 import { gitRemoveWorktreeMutationOptions, gitStatusQueryOptions } from "../lib/gitReactQuery";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { readNativeApi } from "../nativeApi";
-import { useComposerDraftStore } from "../composerDraftStore";
+import { hasComposerDraftContent, useComposerDraftStore } from "../composerDraftStore";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { toastManager } from "./ui/toast";
@@ -63,7 +64,18 @@ import {
 } from "./desktopUpdate.logic";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import { Collapsible, CollapsibleContent } from "./ui/collapsible";
+import {
+  Menu,
+  MenuCheckboxItem,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuPopup,
+  MenuSeparator,
+  MenuTrigger,
+} from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   SidebarContent,
@@ -84,10 +96,23 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { isNonEmpty as isNonEmptyString } from "effect/String";
 import {
+  areAllStatusSectionFiltersSelected,
+  areAllTerminalSectionFiltersSelected,
+  countActiveSidebarThreadFilters,
+  createSidebarThreadFilters,
+  hasActiveSidebarThreadFilters,
+  matchesSidebarThreadFilters,
   resolveSidebarNewThreadEnvMode,
+  SIDEBAR_THREAD_FILTER_MENU_ORDER,
+  SIDEBAR_THREAD_STATUS_LABELS,
+  type SidebarThreadFilters,
+  type SidebarThreadStatusKey,
   resolveThreadRowClassName,
+  resolveThreadStatusKey,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  toggleAllStatusSectionFilters,
+  toggleAllTerminalSectionFilters,
 } from "./Sidebar.logic";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 
@@ -224,6 +249,41 @@ function ProjectFavicon({ cwd }: { cwd: string }) {
 
 type SortableProjectHandleProps = Pick<ReturnType<typeof useSortable>, "attributes" | "listeners">;
 
+function ThreadFilterSectionHeader({
+  label,
+  allSelected = false,
+  onAllToggle,
+}: {
+  label: string;
+  allSelected?: boolean;
+  onAllToggle?: (nextChecked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-2 py-1.5">
+      <MenuGroupLabel className="p-0">{label}</MenuGroupLabel>
+      {onAllToggle ? (
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={allSelected}
+          aria-label={`Toggle all ${label.toLowerCase()} filters`}
+          className={`inline-flex min-h-4 items-center gap-1 rounded-sm px-1 py-0.5 font-medium text-[9px] leading-none outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+            allSelected ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+          }`}
+          onClick={() => onAllToggle(!allSelected)}
+        >
+          <span className="leading-none">All</span>
+          <Checkbox
+            checked={allSelected}
+            className="pointer-events-none self-center size-[0.6875rem] rounded-[2px] sm:size-[0.6875rem] [&_svg]:size-2 sm:[&_svg]:size-2"
+            tabIndex={-1}
+          />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function SortableProjectItem({
   projectId,
   children,
@@ -258,6 +318,7 @@ export default function Sidebar() {
   const toggleProject = useStore((store) => store.toggleProject);
   const reorderProjects = useStore((store) => store.reorderProjects);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearThreadDraft);
+  const composerDraftsByThreadId = useComposerDraftStore((store) => store.draftsByThreadId);
   const getDraftThreadByProjectId = useComposerDraftStore(
     (store) => store.getDraftThreadByProjectId,
   );
@@ -296,9 +357,17 @@ export default function Sidebar() {
   >(() => new Set());
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
+  const statusAllSnapshotRef = useRef<SidebarThreadStatusKey[] | null>(null);
+  const terminalAllSnapshotRef = useRef<Pick<
+    SidebarThreadFilters,
+    "terminalOpen" | "terminalRunning"
+  > | null>(null);
   const dragInProgressRef = useRef(false);
   const suppressProjectClickAfterDragRef = useRef(false);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState | null>(null);
+  const [threadFilters, setThreadFilters] = useState<SidebarThreadFilters>(
+    createSidebarThreadFilters,
+  );
   const selectedThreadIds = useThreadSelectionStore((s) => s.selectedThreadIds);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((s) => s.rangeSelectTo);
@@ -307,10 +376,121 @@ export default function Sidebar() {
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const shouldBrowseForProjectImmediately = isElectron;
   const shouldShowProjectPathEntry = addingProject && !shouldBrowseForProjectImmediately;
+  const clearThreadFilters = useCallback(() => {
+    statusAllSnapshotRef.current = null;
+    terminalAllSnapshotRef.current = null;
+    setThreadFilters(createSidebarThreadFilters());
+  }, []);
   const projectCwdById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.cwd] as const)),
     [projects],
   );
+  const threadTerminalStateMap = useMemo(() => {
+    const map = new Map<ThreadId, ReturnType<typeof selectThreadTerminalState>>();
+    for (const thread of threads) {
+      map.set(thread.id, selectThreadTerminalState(terminalStateByThreadId, thread.id));
+    }
+    return map;
+  }, [terminalStateByThreadId, threads]);
+  const pendingApprovalByThreadId = useMemo(() => {
+    const map = new Map<ThreadId, boolean>();
+    for (const thread of threads) {
+      map.set(thread.id, derivePendingApprovals(thread.activities).length > 0);
+    }
+    return map;
+  }, [threads]);
+  const pendingUserInputByThreadId = useMemo(() => {
+    const map = new Map<ThreadId, boolean>();
+    for (const thread of threads) {
+      map.set(thread.id, derivePendingUserInputs(thread.activities).length > 0);
+    }
+    return map;
+  }, [threads]);
+  const unsentDraftByThreadId = useMemo(() => {
+    const map = new Map<ThreadId, boolean>();
+    for (const thread of threads) {
+      map.set(thread.id, hasComposerDraftContent(composerDraftsByThreadId[thread.id]));
+    }
+    return map;
+  }, [composerDraftsByThreadId, threads]);
+  const threadStatusKeyByThreadId = useMemo(() => {
+    const map = new Map<ThreadId, ReturnType<typeof resolveThreadStatusKey>>();
+    for (const thread of threads) {
+      map.set(
+        thread.id,
+        resolveThreadStatusKey({
+          thread,
+          hasPendingApprovals: pendingApprovalByThreadId.get(thread.id) ?? false,
+          hasPendingUserInput: pendingUserInputByThreadId.get(thread.id) ?? false,
+        }),
+      );
+    }
+    return map;
+  }, [pendingApprovalByThreadId, pendingUserInputByThreadId, threads]);
+  const orderedThreadsByProjectId = useMemo(() => {
+    const map = new Map<ProjectId, typeof threads>();
+    for (const project of projects) {
+      map.set(project.id, []);
+    }
+    for (const thread of threads) {
+      const projectThreads = map.get(thread.projectId);
+      if (!projectThreads) {
+        map.set(thread.projectId, [thread]);
+        continue;
+      }
+      projectThreads.push(thread);
+    }
+    for (const [projectId, projectThreads] of map) {
+      map.set(
+        projectId,
+        projectThreads.toSorted((a, b) => {
+          const byDate = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+          if (byDate !== 0) return byDate;
+          return b.id.localeCompare(a.id);
+        }),
+      );
+    }
+    return map;
+  }, [projects, threads]);
+  const hasActiveThreadFilters = hasActiveSidebarThreadFilters(threadFilters);
+  const activeThreadFilterCount = countActiveSidebarThreadFilters(threadFilters);
+  const allStatusFiltersSelected = areAllStatusSectionFiltersSelected(threadFilters.statuses);
+  const allTerminalFiltersSelected = areAllTerminalSectionFiltersSelected(threadFilters);
+  const filteredThreadsByProjectId = useMemo(() => {
+    const map = new Map<ProjectId, typeof threads>();
+
+    for (const project of projects) {
+      const projectThreads = orderedThreadsByProjectId.get(project.id) ?? [];
+      if (!hasActiveThreadFilters) {
+        map.set(project.id, projectThreads);
+        continue;
+      }
+
+      map.set(
+        project.id,
+        projectThreads.filter((thread) => {
+          const terminalState = threadTerminalStateMap.get(thread.id);
+          return matchesSidebarThreadFilters({
+            statusKey: threadStatusKeyByThreadId.get(thread.id) ?? null,
+            terminalOpen: terminalState?.terminalOpen ?? false,
+            terminalRunning: (terminalState?.runningTerminalIds.length ?? 0) > 0,
+            hasUnsentDraft: unsentDraftByThreadId.get(thread.id) ?? false,
+            filters: threadFilters,
+          });
+        }),
+      );
+    }
+
+    return map;
+  }, [
+    hasActiveThreadFilters,
+    orderedThreadsByProjectId,
+    projects,
+    threadFilters,
+    threadStatusKeyByThreadId,
+    threadTerminalStateMap,
+    unsentDraftByThreadId,
+  ]);
   const threadGitTargets = useMemo(
     () =>
       threads.map((thread) => ({
@@ -383,13 +563,7 @@ export default function Sidebar() {
 
   const focusMostRecentThreadForProject = useCallback(
     (projectId: ProjectId) => {
-      const latestThread = threads
-        .filter((thread) => thread.projectId === projectId)
-        .toSorted((a, b) => {
-          const byDate = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-          if (byDate !== 0) return byDate;
-          return b.id.localeCompare(a.id);
-        })[0];
+      const latestThread = orderedThreadsByProjectId.get(projectId)?.[0];
       if (!latestThread) return;
 
       void navigate({
@@ -397,7 +571,7 @@ export default function Sidebar() {
         params: { threadId: latestThread.id },
       });
     },
-    [navigate, threads],
+    [navigate, orderedThreadsByProjectId],
   );
 
   const addProjectFromPath = useCallback(
@@ -1192,26 +1366,148 @@ export default function Sidebar() {
             <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
               Projects
             </span>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    aria-label="Add project"
-                    aria-pressed={shouldShowProjectPathEntry}
-                    className="inline-flex size-5 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
-                    onClick={handleStartAddProject}
+            <div className="flex items-center gap-1">
+              <Menu>
+                <MenuTrigger
+                  render={
+                    <button
+                      type="button"
+                      aria-label="Filter threads"
+                      aria-pressed={hasActiveThreadFilters}
+                      title="Filter threads"
+                      className={`relative inline-flex size-5 items-center justify-center rounded-md transition-colors ${
+                        hasActiveThreadFilters
+                          ? "bg-accent text-foreground"
+                          : "text-muted-foreground/60 hover:bg-accent hover:text-foreground"
+                      }`}
+                    />
+                  }
+                >
+                  <ListFilterIcon className="size-3" />
+                  {hasActiveThreadFilters ? (
+                    <span className="-top-1 -right-1 absolute min-w-3 rounded-full bg-primary px-0.5 text-center text-[9px] font-medium text-primary-foreground">
+                      {activeThreadFilterCount}
+                    </span>
+                  ) : null}
+                </MenuTrigger>
+                <MenuPopup align="end">
+                  <MenuGroup>
+                    <ThreadFilterSectionHeader
+                      label="Status"
+                      allSelected={allStatusFiltersSelected}
+                      onAllToggle={(nextChecked) => {
+                        const result = toggleAllStatusSectionFilters({
+                          filters: threadFilters,
+                          checked: nextChecked,
+                          previousStatuses: statusAllSnapshotRef.current,
+                        });
+                        statusAllSnapshotRef.current = result.nextPreviousStatuses;
+                        setThreadFilters(result.filters);
+                      }}
+                    />
+                    {SIDEBAR_THREAD_FILTER_MENU_ORDER.map((statusKey) => (
+                      <MenuCheckboxItem
+                        key={statusKey}
+                        checked={threadFilters.statuses.includes(statusKey)}
+                        onCheckedChange={(checked) => {
+                          statusAllSnapshotRef.current = null;
+                          setThreadFilters((current) => ({
+                            ...current,
+                            statuses:
+                              checked === true
+                                ? current.statuses.includes(statusKey)
+                                  ? current.statuses
+                                  : [...current.statuses, statusKey]
+                                : current.statuses.filter((entry) => entry !== statusKey),
+                          }));
+                        }}
+                      >
+                        {SIDEBAR_THREAD_STATUS_LABELS[statusKey]}
+                      </MenuCheckboxItem>
+                    ))}
+                  </MenuGroup>
+                  <MenuSeparator />
+                  <MenuGroup>
+                    <ThreadFilterSectionHeader label="Message" />
+                    <MenuCheckboxItem
+                      checked={threadFilters.unsentDraft}
+                      onCheckedChange={(checked) => {
+                        setThreadFilters((current) => ({
+                          ...current,
+                          unsentDraft: checked === true,
+                        }));
+                      }}
+                    >
+                      Unsent draft
+                    </MenuCheckboxItem>
+                  </MenuGroup>
+                  <MenuSeparator />
+                  <MenuGroup>
+                    <ThreadFilterSectionHeader
+                      label="Terminal"
+                      allSelected={allTerminalFiltersSelected}
+                      onAllToggle={(nextChecked) => {
+                        const result = toggleAllTerminalSectionFilters({
+                          filters: threadFilters,
+                          checked: nextChecked,
+                          previousTerminal: terminalAllSnapshotRef.current,
+                        });
+                        terminalAllSnapshotRef.current = result.nextPreviousTerminal;
+                        setThreadFilters(result.filters);
+                      }}
+                    />
+                    <MenuCheckboxItem
+                      checked={threadFilters.terminalOpen}
+                      onCheckedChange={(checked) => {
+                        terminalAllSnapshotRef.current = null;
+                        setThreadFilters((current) => ({
+                          ...current,
+                          terminalOpen: checked === true,
+                        }));
+                      }}
+                    >
+                      Terminal open
+                    </MenuCheckboxItem>
+                    <MenuCheckboxItem
+                      checked={threadFilters.terminalRunning}
+                      onCheckedChange={(checked) => {
+                        terminalAllSnapshotRef.current = null;
+                        setThreadFilters((current) => ({
+                          ...current,
+                          terminalRunning: checked === true,
+                        }));
+                      }}
+                    >
+                      Terminal running
+                    </MenuCheckboxItem>
+                  </MenuGroup>
+                  <MenuSeparator />
+                  <MenuItem disabled={!hasActiveThreadFilters} onClick={clearThreadFilters}>
+                    Clear filters
+                  </MenuItem>
+                </MenuPopup>
+              </Menu>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      aria-label="Add project"
+                      aria-pressed={shouldShowProjectPathEntry}
+                      className="inline-flex size-5 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={handleStartAddProject}
+                    />
+                  }
+                >
+                  <PlusIcon
+                    className={`size-3.5 transition-transform duration-150 ${
+                      shouldShowProjectPathEntry ? "rotate-45" : "rotate-0"
+                    }`}
                   />
-                }
-              >
-                <PlusIcon
-                  className={`size-3.5 transition-transform duration-150 ${
-                    shouldShowProjectPathEntry ? "rotate-45" : "rotate-0"
-                  }`}
-                />
-              </TooltipTrigger>
-              <TooltipPopup side="right">Add project</TooltipPopup>
-            </Tooltip>
+                </TooltipTrigger>
+                <TooltipPopup side="right">Add project</TooltipPopup>
+              </Tooltip>
+            </div>
           </div>
 
           {shouldShowProjectPathEntry && (
@@ -1293,21 +1589,16 @@ export default function Sidebar() {
                 strategy={verticalListSortingStrategy}
               >
                 {projects.map((project) => {
-                  const projectThreads = threads
-                    .filter((thread) => thread.projectId === project.id)
-                    .toSorted((a, b) => {
-                      const byDate =
-                        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-                      if (byDate !== 0) return byDate;
-                      return b.id.localeCompare(a.id);
-                    });
+                  const projectThreads = orderedThreadsByProjectId.get(project.id) ?? [];
+                  const matchingProjectThreads =
+                    filteredThreadsByProjectId.get(project.id) ?? projectThreads;
                   const isThreadListExpanded = expandedThreadListsByProject.has(project.id);
-                  const hasHiddenThreads = projectThreads.length > THREAD_PREVIEW_LIMIT;
+                  const hasHiddenThreads = matchingProjectThreads.length > THREAD_PREVIEW_LIMIT;
                   const visibleThreads =
                     hasHiddenThreads && !isThreadListExpanded
-                      ? projectThreads.slice(0, THREAD_PREVIEW_LIMIT)
-                      : projectThreads;
-                  const orderedProjectThreadIds = projectThreads.map((t) => t.id);
+                      ? matchingProjectThreads.slice(0, THREAD_PREVIEW_LIMIT)
+                      : matchingProjectThreads;
+                  const orderedProjectThreadIds = matchingProjectThreads.map((t) => t.id);
 
                   return (
                     <SortableProjectItem key={project.id} projectId={project.id}>
@@ -1336,7 +1627,7 @@ export default function Sidebar() {
                                 }`}
                               />
                               <ProjectFavicon cwd={project.cwd} />
-                              <span className="flex-1 truncate text-xs font-medium text-foreground/90">
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground/90">
                                 {project.name}
                               </span>
                             </SidebarMenuButton>
@@ -1381,19 +1672,21 @@ export default function Sidebar() {
                                 const isActive = routeThreadId === thread.id;
                                 const isSelected = selectedThreadIds.has(thread.id);
                                 const isHighlighted = isActive || isSelected;
+                                const hasPendingApprovals =
+                                  pendingApprovalByThreadId.get(thread.id) ?? false;
+                                const hasPendingUserInput =
+                                  pendingUserInputByThreadId.get(thread.id) ?? false;
                                 const threadStatus = resolveThreadStatusPill({
                                   thread,
-                                  hasPendingApprovals:
-                                    derivePendingApprovals(thread.activities).length > 0,
-                                  hasPendingUserInput:
-                                    derivePendingUserInputs(thread.activities).length > 0,
+                                  hasPendingApprovals,
+                                  hasPendingUserInput,
                                 });
                                 const prStatus = prStatusIndicator(
                                   prByThreadId.get(thread.id) ?? null,
                                 );
+                                const terminalState = threadTerminalStateMap.get(thread.id);
                                 const terminalStatus = terminalStatusFromRunningIds(
-                                  selectThreadTerminalState(terminalStateByThreadId, thread.id)
-                                    .runningTerminalIds,
+                                  terminalState?.runningTerminalIds ?? [],
                                 );
 
                                 return (
@@ -1558,7 +1851,6 @@ export default function Sidebar() {
                                   </SidebarMenuSubItem>
                                 );
                               })}
-
                               {hasHiddenThreads && !isThreadListExpanded && (
                                 <SidebarMenuSubItem className="w-full">
                                   <SidebarMenuSubButton

@@ -231,11 +231,26 @@ function composerImageDedupKey(image: ComposerImageAttachment): string {
   return `${image.mimeType}\u0000${image.sizeBytes}\u0000${image.name}`;
 }
 
+export function hasComposerDraftContent(
+  draft:
+    | Pick<ComposerThreadDraftState, "prompt" | "images" | "persistedAttachments">
+    | null
+    | undefined,
+): boolean {
+  if (!draft) {
+    return false;
+  }
+
+  return (
+    draft.prompt.trim().length > 0 ||
+    draft.images.length > 0 ||
+    draft.persistedAttachments.length > 0
+  );
+}
+
 function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
   return (
-    draft.prompt.length === 0 &&
-    draft.images.length === 0 &&
-    draft.persistedAttachments.length === 0 &&
+    !hasComposerDraftContent(draft) &&
     draft.provider === null &&
     draft.model === null &&
     draft.runtimeMode === null &&

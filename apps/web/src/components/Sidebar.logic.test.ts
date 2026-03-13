@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  areAllStatusSectionFiltersSelected,
+  areAllTerminalSectionFiltersSelected,
+  countActiveSidebarThreadFilters,
+  createSidebarThreadFilters,
   hasUnseenCompletion,
+  hasActiveSidebarThreadFilters,
+  matchesSidebarThreadFilters,
   resolveSidebarNewThreadEnvMode,
   resolveThreadRowClassName,
+  resolveThreadStatusKey,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  toggleAllStatusSectionFilters,
+  toggleAllTerminalSectionFilters,
 } from "./Sidebar.logic";
 
 function makeLatestTurn(overrides?: {
@@ -98,6 +107,16 @@ describe("resolveThreadStatusPill", () => {
     },
   };
 
+  it("resolves pending approval as the highest-priority status key", () => {
+    expect(
+      resolveThreadStatusKey({
+        thread: baseThread,
+        hasPendingApprovals: true,
+        hasPendingUserInput: true,
+      }),
+    ).toBe("pendingApproval");
+  });
+
   it("shows pending approval before all other statuses", () => {
     expect(
       resolveThreadStatusPill({
@@ -173,6 +192,303 @@ describe("resolveThreadStatusPill", () => {
         hasPendingUserInput: false,
       }),
     ).toMatchObject({ label: "Completed", pulse: false });
+  });
+
+  it("does not treat an already-visited settled thread as completed", () => {
+    expect(
+      resolveThreadStatusKey({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: makeLatestTurn(),
+          lastVisitedAt: "2026-03-09T10:06:00.000Z",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            orchestrationStatus: "ready",
+          },
+        },
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("matchesSidebarThreadFilters", () => {
+  const defaultFilters = createSidebarThreadFilters();
+
+  it("matches any thread when no filters are active", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: null,
+        terminalOpen: false,
+        terminalRunning: false,
+        hasUnsentDraft: false,
+        filters: defaultFilters,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches a single selected status", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "working",
+        terminalOpen: false,
+        terminalRunning: false,
+        hasUnsentDraft: false,
+        filters: {
+          ...defaultFilters,
+          statuses: ["working"],
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("treats multiple selected statuses as OR conditions", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "pendingApproval",
+        terminalOpen: false,
+        terminalRunning: false,
+        hasUnsentDraft: false,
+        filters: {
+          ...defaultFilters,
+          statuses: ["working", "pendingApproval"],
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("requires an open terminal when the terminal-open filter is active", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "working",
+        terminalOpen: false,
+        terminalRunning: true,
+        hasUnsentDraft: false,
+        filters: {
+          ...defaultFilters,
+          terminalOpen: true,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("requires a running terminal when the terminal-running filter is active", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "working",
+        terminalOpen: true,
+        terminalRunning: false,
+        hasUnsentDraft: false,
+        filters: {
+          ...defaultFilters,
+          terminalRunning: true,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("treats terminal open and running as OR conditions within the terminal section", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "working",
+        terminalOpen: false,
+        terminalRunning: true,
+        hasUnsentDraft: false,
+        filters: {
+          ...defaultFilters,
+          terminalOpen: true,
+          terminalRunning: true,
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("requires an unsent draft when the message filter is active", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "working",
+        terminalOpen: true,
+        terminalRunning: true,
+        hasUnsentDraft: false,
+        filters: {
+          ...defaultFilters,
+          unsentDraft: true,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("intersects status, terminal, and message filters across sections", () => {
+    expect(
+      matchesSidebarThreadFilters({
+        statusKey: "working",
+        terminalOpen: false,
+        terminalRunning: true,
+        hasUnsentDraft: true,
+        filters: {
+          statuses: ["working", "connecting"],
+          terminalOpen: true,
+          terminalRunning: true,
+          unsentDraft: true,
+        },
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("sidebar thread filter counters", () => {
+  it("reports inactive default filters", () => {
+    expect(
+      hasActiveSidebarThreadFilters({
+        statuses: [],
+        terminalOpen: false,
+        terminalRunning: false,
+        unsentDraft: false,
+      }),
+    ).toBe(false);
+    expect(
+      countActiveSidebarThreadFilters({
+        statuses: [],
+        terminalOpen: false,
+        terminalRunning: false,
+        unsentDraft: false,
+      }),
+    ).toBe(0);
+  });
+
+  it("counts status, terminal, and message filters together", () => {
+    expect(
+      countActiveSidebarThreadFilters({
+        statuses: ["working", "completed"],
+        terminalOpen: true,
+        terminalRunning: false,
+        unsentDraft: true,
+      }),
+    ).toBe(4);
+  });
+});
+
+describe("sidebar section all toggles", () => {
+  it("detects when all status filters are selected", () => {
+    expect(
+      areAllStatusSectionFiltersSelected([
+        "working",
+        "connecting",
+        "pendingApproval",
+        "awaitingInput",
+        "planReady",
+        "completed",
+      ]),
+    ).toBe(true);
+    expect(areAllStatusSectionFiltersSelected(["working", "completed"])).toBe(false);
+  });
+
+  it("selects all status filters and snapshots the previous subset", () => {
+    expect(
+      toggleAllStatusSectionFilters({
+        filters: {
+          ...createSidebarThreadFilters(),
+          statuses: ["working", "completed"],
+        },
+        checked: true,
+        previousStatuses: null,
+      }),
+    ).toEqual({
+      filters: {
+        ...createSidebarThreadFilters(),
+        statuses: [
+          "working",
+          "connecting",
+          "pendingApproval",
+          "awaitingInput",
+          "planReady",
+          "completed",
+        ],
+      },
+      nextPreviousStatuses: ["working", "completed"],
+    });
+  });
+
+  it("restores the previous status subset when all is unchecked", () => {
+    expect(
+      toggleAllStatusSectionFilters({
+        filters: {
+          ...createSidebarThreadFilters(),
+          statuses: [
+            "working",
+            "connecting",
+            "pendingApproval",
+            "awaitingInput",
+            "planReady",
+            "completed",
+          ],
+        },
+        checked: false,
+        previousStatuses: ["working", "completed"],
+      }),
+    ).toEqual({
+      filters: {
+        ...createSidebarThreadFilters(),
+        statuses: ["working", "completed"],
+      },
+      nextPreviousStatuses: null,
+    });
+  });
+
+  it("detects when all terminal filters are selected", () => {
+    expect(
+      areAllTerminalSectionFiltersSelected({
+        terminalOpen: true,
+        terminalRunning: true,
+      }),
+    ).toBe(true);
+    expect(
+      areAllTerminalSectionFiltersSelected({
+        terminalOpen: true,
+        terminalRunning: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("selects and restores all terminal filters", () => {
+    const selectedAll = toggleAllTerminalSectionFilters({
+      filters: {
+        ...createSidebarThreadFilters(),
+        terminalOpen: true,
+      },
+      checked: true,
+      previousTerminal: null,
+    });
+
+    expect(selectedAll).toEqual({
+      filters: {
+        ...createSidebarThreadFilters(),
+        terminalOpen: true,
+        terminalRunning: true,
+      },
+      nextPreviousTerminal: {
+        terminalOpen: true,
+        terminalRunning: false,
+      },
+    });
+
+    expect(
+      toggleAllTerminalSectionFilters({
+        filters: selectedAll.filters,
+        checked: false,
+        previousTerminal: selectedAll.nextPreviousTerminal,
+      }),
+    ).toEqual({
+      filters: {
+        ...createSidebarThreadFilters(),
+        terminalOpen: true,
+        terminalRunning: false,
+      },
+      nextPreviousTerminal: null,
+    });
   });
 });
 

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ComposerImageAttachment,
   createDebouncedStorage,
+  hasComposerDraftContent,
   useComposerDraftStore,
 } from "./composerDraftStore";
 
@@ -120,6 +121,35 @@ describe("composerDraftStore addImages", () => {
     const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
     expect(draft?.images.map((image) => image.id)).toEqual(["img-shared"]);
     expect(revokeSpy).not.toHaveBeenCalledWith("blob:shared");
+  });
+});
+
+describe("hasComposerDraftContent", () => {
+  it("treats whitespace-only prompt state as empty when there are no attachments", () => {
+    expect(
+      hasComposerDraftContent({
+        prompt: "   ",
+        images: [],
+        persistedAttachments: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true when a draft has prompt text or attachments", () => {
+    expect(
+      hasComposerDraftContent({
+        prompt: "Unsaved message",
+        images: [],
+        persistedAttachments: [],
+      }),
+    ).toBe(true);
+    expect(
+      hasComposerDraftContent({
+        prompt: "",
+        images: [makeImage({ id: "img-content", previewUrl: "blob:content" })],
+        persistedAttachments: [],
+      }),
+    ).toBe(true);
   });
 });
 
