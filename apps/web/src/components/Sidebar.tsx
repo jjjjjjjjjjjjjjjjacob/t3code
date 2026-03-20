@@ -25,7 +25,7 @@ import {
   type DragEndEvent,
 } from "@dnd-kit/core";
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { restrictToParentElement, restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
   DEFAULT_MODEL_BY_PROVIDER,
@@ -40,7 +40,7 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { useAppSettings } from "../appSettings";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
-import { isMacPlatform, newCommandId, newProjectId } from "../lib/utils";
+import { isLinuxPlatform, isMacPlatform, newCommandId, newProjectId } from "../lib/utils";
 import { useStore } from "../store";
 import { shortcutLabelForCommand } from "../keybindings";
 import { derivePendingApprovals, derivePendingUserInputs } from "../session-logic";
@@ -102,6 +102,7 @@ import {
   createSidebarThreadFilters,
   hasActiveSidebarThreadFilters,
   matchesSidebarThreadFilters,
+  resolveProjectStatusIndicator,
   resolveSidebarNewThreadEnvMode,
   SIDEBAR_THREAD_FILTER_MENU_ORDER,
   SIDEBAR_THREAD_STATUS_LABELS,
@@ -374,7 +375,8 @@ export default function Sidebar() {
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const removeFromSelection = useThreadSelectionStore((s) => s.removeFromSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
-  const shouldBrowseForProjectImmediately = isElectron;
+  const isLinuxDesktop = isElectron && isLinuxPlatform(navigator.platform);
+  const shouldBrowseForProjectImmediately = isElectron && !isLinuxDesktop;
   const shouldShowProjectPathEntry = addingProject && !shouldBrowseForProjectImmediately;
   const clearThreadFilters = useCallback(() => {
     statusAllSnapshotRef.current = null;
@@ -735,7 +737,6 @@ export default function Sidebar() {
       if (!api) return;
       const thread = threads.find((t) => t.id === threadId);
       if (!thread) return;
-
       const threadProject = projects.find((project) => project.id === thread.projectId);
       // When bulk-deleting, exclude the other threads being deleted so
       // getOrphanedWorktreePathForThread correctly detects that no surviving
@@ -839,7 +840,7 @@ export default function Sidebar() {
     ],
   );
 
-  const { copyToClipboard } = useCopyToClipboard<{ threadId: ThreadId }>({
+  const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{ threadId: ThreadId }>({
     onCopy: (ctx) => {
       toastManager.add({
         type: "success",
@@ -855,21 +856,40 @@ export default function Sidebar() {
       });
     },
   });
+  const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
+    onCopy: (ctx) => {
+      toastManager.add({
+        type: "success",
+        title: "Path copied",
+        description: ctx.path,
+      });
+    },
+    onError: (error) => {
+      toastManager.add({
+        type: "error",
+        title: "Failed to copy path",
+        description: error instanceof Error ? error.message : "An error occurred.",
+      });
+    },
+  });
   const handleThreadContextMenu = useCallback(
     async (threadId: ThreadId, position: { x: number; y: number }) => {
       const api = readNativeApi();
       if (!api) return;
+      const thread = threads.find((t) => t.id === threadId);
+      if (!thread) return;
+      const threadWorkspacePath =
+        thread.worktreePath ?? projectCwdById.get(thread.projectId) ?? null;
       const clicked = await api.contextMenu.show(
         [
           { id: "rename", label: "Rename thread" },
           { id: "mark-unread", label: "Mark unread" },
+          { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },
           { id: "delete", label: "Delete", destructive: true },
         ],
         position,
       );
-      const thread = threads.find((t) => t.id === threadId);
-      if (!thread) return;
 
       if (clicked === "rename") {
         setRenamingThreadId(threadId);
@@ -882,8 +902,20 @@ export default function Sidebar() {
         markThreadUnread(threadId);
         return;
       }
+      if (clicked === "copy-path") {
+        if (!threadWorkspacePath) {
+          toastManager.add({
+            type: "error",
+            title: "Path unavailable",
+            description: "This thread does not have a workspace path to copy.",
+          });
+          return;
+        }
+        copyPathToClipboard(threadWorkspacePath, { path: threadWorkspacePath });
+        return;
+      }
       if (clicked === "copy-thread-id") {
-        copyToClipboard(threadId, { threadId });
+        copyThreadIdToClipboard(threadId, { threadId });
         return;
       }
       if (clicked !== "delete") return;
@@ -900,7 +932,15 @@ export default function Sidebar() {
       }
       await deleteThread(threadId);
     },
-    [appSettings.confirmThreadDelete, copyToClipboard, deleteThread, markThreadUnread, threads],
+    [
+      appSettings.confirmThreadDelete,
+      copyPathToClipboard,
+      copyThreadIdToClipboard,
+      deleteThread,
+      markThreadUnread,
+      projectCwdById,
+      threads,
+    ],
   );
 
   const handleMultiSelectContextMenu = useCallback(
@@ -1492,9 +1532,9 @@ export default function Sidebar() {
                   render={
                     <button
                       type="button"
-                      aria-label="Add project"
+                      aria-label={shouldShowProjectPathEntry ? "Cancel add project" : "Add project"}
                       aria-pressed={shouldShowProjectPathEntry}
-                      className="inline-flex size-5 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                      className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
                       onClick={handleStartAddProject}
                     />
                   }
@@ -1505,7 +1545,9 @@ export default function Sidebar() {
                     }`}
                   />
                 </TooltipTrigger>
-                <TooltipPopup side="right">Add project</TooltipPopup>
+                <TooltipPopup side="right">
+                  {shouldShowProjectPathEntry ? "Cancel add project" : "Add project"}
+                </TooltipPopup>
               </Tooltip>
             </div>
           </div>
@@ -1578,7 +1620,7 @@ export default function Sidebar() {
           <DndContext
             sensors={projectDnDSensors}
             collisionDetection={projectCollisionDetection}
-            modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+            modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
             onDragStart={handleProjectDragStart}
             onDragEnd={handleProjectDragEnd}
             onDragCancel={handleProjectDragCancel}
@@ -1592,13 +1634,22 @@ export default function Sidebar() {
                   const projectThreads = orderedThreadsByProjectId.get(project.id) ?? [];
                   const matchingProjectThreads =
                     filteredThreadsByProjectId.get(project.id) ?? projectThreads;
+                  const projectStatus = resolveProjectStatusIndicator(
+                    matchingProjectThreads.map((thread) =>
+                      resolveThreadStatusPill({
+                        thread,
+                        hasPendingApprovals: pendingApprovalByThreadId.get(thread.id) ?? false,
+                        hasPendingUserInput: pendingUserInputByThreadId.get(thread.id) ?? false,
+                      }),
+                    ),
+                  );
                   const isThreadListExpanded = expandedThreadListsByProject.has(project.id);
                   const hasHiddenThreads = matchingProjectThreads.length > THREAD_PREVIEW_LIMIT;
                   const visibleThreads =
                     hasHiddenThreads && !isThreadListExpanded
                       ? matchingProjectThreads.slice(0, THREAD_PREVIEW_LIMIT)
                       : matchingProjectThreads;
-                  const orderedProjectThreadIds = matchingProjectThreads.map((t) => t.id);
+                  const orderedProjectThreadIds = matchingProjectThreads.map((thread) => thread.id);
 
                   return (
                     <SortableProjectItem key={project.id} projectId={project.id}>
@@ -1621,11 +1672,28 @@ export default function Sidebar() {
                                 });
                               }}
                             >
-                              <ChevronRightIcon
-                                className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
-                                  project.expanded ? "rotate-90" : ""
-                                }`}
-                              />
+                              {!project.expanded && projectStatus ? (
+                                <span
+                                  aria-hidden="true"
+                                  title={projectStatus.label}
+                                  className={`-ml-0.5 relative inline-flex size-3.5 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
+                                >
+                                  <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
+                                    <span
+                                      className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
+                                        projectStatus.pulse ? "animate-pulse" : ""
+                                      }`}
+                                    />
+                                  </span>
+                                  <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-muted-foreground/70 opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
+                                </span>
+                              ) : (
+                                <ChevronRightIcon
+                                  className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
+                                    project.expanded ? "rotate-90" : ""
+                                  }`}
+                                />
+                              )}
                               <ProjectFavicon cwd={project.cwd} />
                               <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground/90">
                                 {project.name}

@@ -1,6 +1,10 @@
 import type { Thread } from "../types";
 import { cn } from "../lib/utils";
-import { findLatestProposedPlan, isLatestTurnSettled } from "../session-logic";
+import {
+  findLatestProposedPlan,
+  hasActionableProposedPlan,
+  isLatestTurnSettled,
+} from "../session-logic";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export type SidebarNewThreadEnvMode = "local" | "worktree";
@@ -58,6 +62,15 @@ export interface ThreadStatusPill {
   dotClass: string;
   pulse: boolean;
 }
+
+const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
+  "Pending Approval": 5,
+  "Awaiting Input": 4,
+  Working: 3,
+  Connecting: 3,
+  "Plan Ready": 2,
+  Completed: 1,
+};
 
 type ThreadStatusInput = Pick<
   Thread,
@@ -131,7 +144,7 @@ export function resolveThreadRowClassName(input: {
   isSelected: boolean;
 }): string {
   const baseClassName =
-    "h-7 w-full translate-x-0 cursor-default justify-start px-2 text-left select-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring";
+    "h-7 w-full translate-x-0 cursor-pointer justify-start px-2 text-left select-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring";
 
   if (input.isSelected && input.isActive) {
     return cn(
@@ -184,7 +197,9 @@ export function resolveThreadStatusKey(input: {
     !hasPendingUserInput &&
     thread.interactionMode === "plan" &&
     isLatestTurnSettled(thread.latestTurn, thread.session) &&
-    findLatestProposedPlan(thread.proposedPlans, thread.latestTurn?.turnId ?? null) !== null;
+    hasActionableProposedPlan(
+      findLatestProposedPlan(thread.proposedPlans, thread.latestTurn?.turnId ?? null),
+    );
   if (hasPlanReadyPrompt) {
     return "planReady";
   }
@@ -326,4 +341,22 @@ export function matchesSidebarThreadFilters(input: {
   }
 
   return true;
+}
+
+export function resolveProjectStatusIndicator(
+  statuses: ReadonlyArray<ThreadStatusPill | null>,
+): ThreadStatusPill | null {
+  let highestPriorityStatus: ThreadStatusPill | null = null;
+
+  for (const status of statuses) {
+    if (status === null) continue;
+    if (
+      highestPriorityStatus === null ||
+      THREAD_STATUS_PRIORITY[status.label] > THREAD_STATUS_PRIORITY[highestPriorityStatus.label]
+    ) {
+      highestPriorityStatus = status;
+    }
+  }
+
+  return highestPriorityStatus;
 }
